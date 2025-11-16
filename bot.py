@@ -15,7 +15,7 @@ OWNER_ID = 8405313334
 USERS_FILE = "users.txt"
 WELCOME_FILE = "welcome.json"
 
-WEBHOOK_URL = f"https://lusty2.onrender.com/{TOKEN}"   # for keep-alive
+WEBHOOK_URL = f"https://gbbot-s267.onrender.com/{TOKEN}"   # for keep-alive
 # --------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
