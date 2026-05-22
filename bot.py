@@ -36,7 +36,7 @@ def load_welcome():
         with open(WELCOME_FILE, "r") as f:
             return json.load(f)
     except:
-        return {"text": "Welcome to the Gandi Baat The Premium Quality \n New link will be comming soon !", "photo": None}
+        return {"text": "Welcome to the Gandi Baat The Premium Quality \n Start bot after some time for link !", "photo": None}
 
 
 def save_welcome(text, photo):
