@@ -30,7 +30,7 @@ lock = threading.Lock()
 # ---------- load & save permanent welcome ----------
 def load_welcome():
     if not os.path.exists(WELCOME_FILE):
-        return {"text": "Welcome to the lusty vault \n join backup", "photo": None}
+        return {"text": "Welcome to the Gandi Baat The Premium Quality \n Start bot after some time for link !", "photo": None}
 
     try:
         with open(WELCOME_FILE, "r") as f:
