@@ -11,7 +11,7 @@ from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, Ca
 
 # --------------------- CONFIG ---------------------
 TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render
-OWNER_ID = 8405313334
+OWNER_ID = 7735508963
 USERS_FILE = "users.txt"
 WELCOME_FILE = "welcome.json"
 
