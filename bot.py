@@ -1,21 +1,19 @@
 import os
-import json
+import re
 import logging
 import threading
 import time
-import requests
+from io import BytesIO
 
+import requests
+import instaloader
 from flask import Flask, request
 from telegram import Update, Bot
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # --------------------- CONFIG ---------------------
-TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render
-OWNER_ID = 7735508963
-USERS_FILE = "users.txt"
-WELCOME_FILE = "welcome.json"
-
-WEBHOOK_URL = f"https://gbbot-s267.onrender.com/{TOKEN}"   # for keep-alive
+TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render env vars
+WEBHOOK_URL = f"https://gbbot-s267.onrender.com/{TOKEN}"  # change to your own Render URL
 # --------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
@@ -25,130 +23,105 @@ app = Flask(__name__)
 bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
-lock = threading.Lock()
+# instaloader context - only used for fetching PUBLIC post metadata, no login
+L = instaloader.Instaloader(
+    download_pictures=False,
+    download_videos=False,
+    download_video_thumbnails=False,
+    download_geotags=False,
+    download_comments=False,
+    save_metadata=False,
+    compress_json=False,
+)
 
-# ---------- load & save permanent welcome ----------
-def load_welcome():
-    if not os.path.exists(WELCOME_FILE):
-        return {"text": "Welcome to the Gandi Baat The Premium Quality \n Start bot after some time for link !", "photo": None}
-
-    try:
-        with open(WELCOME_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"text": "Welcome to the Gandi Baat The Premium Quality \n Start bot after some time for link !", "photo": None}
-
-
-def save_welcome(text, photo):
-    data = {"text": text, "photo": photo}
-    with open(WELCOME_FILE, "w") as f:
-        json.dump(data, f)
+INSTAGRAM_URL_RE = re.compile(
+    r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)"
+)
 
 
-welcome_data = load_welcome()
+def extract_shortcode(text: str):
+    match = INSTAGRAM_URL_RE.search(text)
+    return match.group(1) if match else None
 
 
-# ---------- persistent users ----------
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        open(USERS_FILE, 'a').close()
-        return set()
-    with open(USERS_FILE, 'r') as f:
-        return {int(line.strip()) for line in f if line.strip()}
+def fetch_media_urls(shortcode: str):
+    """
+    Returns a list of dicts: [{"type": "video"/"photo", "url": "..."}]
+    Handles single posts, reels, and carousels (multiple items).
+    """
+    post = instaloader.Post.from_shortcode(L.context, shortcode)
+    items = []
+
+    if post.typename == "GraphSidecar":
+        for node in post.get_sidecar_nodes():
+            if node.is_video:
+                items.append({"type": "video", "url": node.video_url})
+            else:
+                items.append({"type": "photo", "url": node.display_url})
+    else:
+        if post.is_video:
+            items.append({"type": "video", "url": post.video_url})
+        else:
+            items.append({"type": "photo", "url": post.url})
+
+    return items
 
 
-def save_user(uid: int):
-    with lock:
-        users = load_users()
-        if uid not in users:
-            with open(USERS_FILE, 'a') as f:
-                f.write(f"{uid}\n")
-
-
-def forward_id(uid: int):
-    try:
-        bot.send_message(chat_id=OWNER_ID, text=str(uid))
-    except Exception as e:
-        logger.error(f"Failed to forward ID {uid}: {e}")
+def download_bytes(url: str) -> BytesIO:
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    buf = BytesIO(resp.content)
+    buf.seek(0)
+    return buf
 
 
 # ---------- handlers ----------
 def start(update: Update, context: CallbackContext):
-    user = update.effective_user
-    uid = user.id
-    save_user(uid)
-    forward_id(uid)
-
-    text = welcome_data["text"]
-    photo = welcome_data["photo"]
-
-    if photo:
-        bot.send_photo(chat_id=uid, photo=photo, caption=text)
-    else:
-        bot.send_message(chat_id=uid, text=text)
+    update.message.reply_text(
+        "👋 Instagram Downloader Bot\n\n"
+        "Bas kisi bhi public Instagram post, reel, ya carousel ka link bhej do, "
+        "main uska media download karke bhej dunga."
+    )
 
 
-def any_message(update: Update, context: CallbackContext):
-    user = update.effective_user
-    uid = user.id
+def handle_message(update: Update, context: CallbackContext):
+    text = update.message.text or ""
+    shortcode = extract_shortcode(text)
 
-    save_user(uid)
-    forward_id(uid)
-
-    update.message.reply_text("Send /start for update...")
-
-
-def gbupdate(update: Update, context: CallbackContext):
-    msg = update.message.reply_to_message
-    if not msg:
+    if not shortcode:
+        update.message.reply_text(
+            "❌ Ye valid Instagram post/reel link nahi lag raha. "
+            "Example: https://www.instagram.com/reel/XXXXXXXXX/"
+        )
         return
 
-    # Anyone can update welcome
-    text = msg.caption or msg.text or ""
-    photo = None
+    update.message.reply_text("⏳ Downloading, thoda ruko...")
 
-    if msg.photo:
-        photo = msg.photo[-1].file_id
-    elif msg.document:
-        photo = msg.document.file_id
-
-    save_welcome(text, photo)
-
-    global welcome_data
-    welcome_data = load_welcome()
-
-    update.message.reply_text("✅ Permanent welcome message updated!")
-
-
-def gbboardcaste(update: Update, context: CallbackContext):
-    msg = update.message.reply_to_message
-    if not msg:
+    try:
+        items = fetch_media_urls(shortcode)
+    except Exception as e:
+        logger.error(f"Failed to fetch post {shortcode}: {e}")
+        update.message.reply_text(
+            "⚠️ Download nahi ho paya. Ho sakta hai post private ho, "
+            "delete ho gaya ho, ya Instagram ne rate-limit lagaya ho."
+        )
         return
 
-    users = load_users()
-    text = msg.caption or msg.text or ""
-    photo = None
-
-    if msg.photo:
-        photo = msg.photo[-1].file_id
-    elif msg.document:
-        photo = msg.document.file_id
-
-    for uid in users:
+    for item in items:
         try:
-            if photo:
-                bot.send_photo(chat_id=uid, photo=photo, caption=text)
+            file_bytes = download_bytes(item["url"])
+            if item["type"] == "video":
+                update.message.reply_video(video=file_bytes)
             else:
-                bot.send_message(chat_id=uid, text=text)
+                update.message.reply_photo(photo=file_bytes)
         except Exception as e:
-            logger.warning(f"Failed to broadcast to {uid}: {e}")
+            logger.error(f"Failed to send media: {e}")
+            update.message.reply_text("⚠️ Ek media file bhejne mein error aaya.")
 
 
 # ---------- register ----------
 dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("gbupdate", gbupdate))  # Updated command
-dispatcher.add_handler(CommandHandler("gbboardcaste", gbboardcaste))  # Updated command
-dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, any_message))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
 
 # ---------- webhook ----------
@@ -171,24 +144,20 @@ def set_webhook():
         logger.info(f"Webhook set to {WEBHOOK_URL}")
 
 
-# ---------- KEEP ALIVE FUNCTION ----------
 def keep_alive():
-    """Pings the Render app every 5 minutes to keep it alive."""
+    """Pings the Render app every 5 minutes to keep the free-tier instance awake."""
     while True:
         try:
             requests.get(WEBHOOK_URL)
             print("🔄 Keep-alive ping sent.")
         except Exception as e:
             print(f"❌ Keep-alive failed: {e}")
-        time.sleep(300)  # 5 minutes
+        time.sleep(300)
 
 
 # ---------- MAIN ----------
 if __name__ == '__main__':
     set_webhook()
-
-    # Start keep-alive thread
     threading.Thread(target=keep_alive, daemon=True).start()
-
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
