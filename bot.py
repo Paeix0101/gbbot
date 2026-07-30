@@ -13,7 +13,8 @@ from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, Ca
 
 # --------------------- CONFIG ---------------------
 TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render env vars
-WEBHOOK_URL = f"https://gbbot-s267.onrender.com/{TOKEN}"  # change to your own Render URL
+BASE_URL = os.getenv("WEBHOOK_URL", "https://gbbot-s267.onrender.com").rstrip("/")  # set in Render env vars
+WEBHOOK_URL = f"{BASE_URL}/{TOKEN}"
 # --------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
