@@ -19,11 +19,15 @@ BASE_URL = os.getenv("WEBHOOK_URL", "https://your-app.onrender.com").rstrip("/")
 WEBHOOK_URL = f"{BASE_URL}/{TOKEN}"
 
 # AUTHORIZED_USERS env format: "123456789,987654321"
-AUTHORIZED_USERS = {
+# These stay permanently authorized (never expire on restart), same as anyone granted via /grant.
+PERMANENT_USERS = {
     int(uid.strip())
     for uid in os.getenv("AUTHORIZED_USERS", "").split(",")
     if uid.strip()
 }
+
+# In-memory only — resets automatically whenever Render restarts the service (e.g. every 30 days).
+granted_users = set()
 
 FORWARD_DELAY = float(os.getenv("FORWARD_DELAY", "1.2"))  # seconds between each forward, tune if flood errors happen
 # --------------------------------------------------
@@ -40,7 +44,7 @@ sessions = {}
 
 
 def is_authorized(user_id: int) -> bool:
-    return user_id in AUTHORIZED_USERS
+    return user_id in PERMANENT_USERS or user_id in granted_users
 
 
 def is_media(msg) -> bool:
@@ -84,6 +88,49 @@ def cancel(update: Update, context: CallbackContext):
         update.message.reply_text("❌ Pending selection cancel ho gayi.")
     else:
         update.message.reply_text("Koi pending selection nahi hai.")
+
+
+def grant(update: Update, context: CallbackContext):
+    if not context.args:
+        update.message.reply_text("Usage: /grant <user_id>")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        update.message.reply_text("❌ Valid numeric user ID do. Example: /grant 123456789")
+        return
+
+    granted_users.add(target_id)
+    update.message.reply_text(
+        f"✅ User {target_id} authorize ho gaya.\n"
+        f"⚠️ Ye grant sirf tab tak valid hai jab tak bot restart nahi hota "
+        f"(Render ~30 din mein restart karta hai) — uske baad phir se /grant karna padega."
+    )
+
+
+def revoke(update: Update, context: CallbackContext):
+    if not context.args:
+        update.message.reply_text("Usage: /revoke <user_id>")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        update.message.reply_text("❌ Valid numeric user ID do.")
+        return
+
+    granted_users.discard(target_id)
+    update.message.reply_text(f"🚫 User {target_id} ka access hata diya.")
+
+
+def listauth(update: Update, context: CallbackContext):
+    if not granted_users:
+        update.message.reply_text("Abhi koi temporarily granted user nahi hai.")
+        return
+
+    lines = "\n".join(str(uid) for uid in granted_users)
+    update.message.reply_text(f"Temporarily granted users:\n{lines}")
 
 
 def here1(update: Update, context: CallbackContext):
@@ -225,6 +272,9 @@ dispatcher.add_handler(CommandHandler("cancel", cancel))
 dispatcher.add_handler(CommandHandler("here1", here1, filters=Filters.reply))
 dispatcher.add_handler(CommandHandler("here2", here2, filters=Filters.reply))
 dispatcher.add_handler(CommandHandler("bhejde", bhejde))
+dispatcher.add_handler(CommandHandler("grant", grant))
+dispatcher.add_handler(CommandHandler("revoke", revoke))
+dispatcher.add_handler(CommandHandler("listauth", listauth))
 
 
 # ---------- webhook ----------
