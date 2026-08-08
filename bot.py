@@ -18,21 +18,6 @@ TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render env vars
 BASE_URL = os.getenv("WEBHOOK_URL", "https://your-app.onrender.com").rstrip("/")
 WEBHOOK_URL = f"{BASE_URL}/{TOKEN}"
 
-# CHAT_MAP env format: "source_id1:dest_id1,source_id2:dest_id2"
-# Example: "-1001111111111:-1002222222222,-1003333333333:-1004444444444"
-def parse_chat_map(raw: str):
-    mapping = {}
-    for pair in raw.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        src, dst = pair.split(":")
-        mapping[int(src)] = int(dst)
-    return mapping
-
-
-CHAT_MAP = parse_chat_map(os.getenv("CHAT_MAP", ""))
-
 # AUTHORIZED_USERS env format: "123456789,987654321"
 AUTHORIZED_USERS = {
     int(uid.strip())
@@ -50,7 +35,7 @@ app = Flask(__name__)
 bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
-# session[(user_id, chat_id)] = start_message_id
+# sessions[user_id] = {"source_chat": int, "start": int, "end": int|None}
 sessions = {}
 
 
@@ -75,9 +60,9 @@ def is_media(msg) -> bool:
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
         "👋 Range Forward Bot\n\n"
-        "Source group/channel mein kisi media pe reply karke /here1 bhejo, "
-        "phir end wale media pe reply karke /here2 bhejo. "
-        "Beech ke saare media messages destination pe forward ho jayenge.\n\n"
+        "1️⃣ Source group/channel mein pehle media pe reply karke /here1 bhejo\n"
+        "2️⃣ Last media pe reply karke /here2 bhejo\n"
+        "3️⃣ Jis bhi group/channel mein bhejna hai, wahan jaake /bhejde bhejo (koi reply nahi chahiye)\n\n"
         "/myid — apna Telegram user ID dekho\n"
         "/chatid — is chat ki ID dekho\n"
         "/cancel — pending selection cancel karo"
@@ -93,9 +78,9 @@ def chatid(update: Update, context: CallbackContext):
 
 
 def cancel(update: Update, context: CallbackContext):
-    key = (update.effective_user.id, update.effective_chat.id)
-    if key in sessions:
-        del sessions[key]
+    user_id = update.effective_user.id
+    if user_id in sessions:
+        del sessions[user_id]
         update.message.reply_text("❌ Pending selection cancel ho gayi.")
     else:
         update.message.reply_text("Koi pending selection nahi hai.")
@@ -108,19 +93,19 @@ def here1(update: Update, context: CallbackContext):
     if not is_authorized(user.id):
         return  # silently ignore unauthorized users
 
-    if chat.id not in CHAT_MAP:
-        update.message.reply_text("⚠️ Ye chat kisi configured source/destination pair mein nahi hai.")
-        return
-
     replied = update.message.reply_to_message
     if not replied:
         update.message.reply_text("❌ Kisi media message pe reply karke /here1 bhejo.")
         return
 
-    sessions[(user.id, chat.id)] = replied.message_id
+    sessions[user.id] = {
+        "source_chat": chat.id,
+        "start": replied.message_id,
+        "end": None,
+    }
     update.message.reply_text(
         f"✅ Start point mark ho gaya (ID {replied.message_id}).\n"
-        f"Ab end wale media pe reply karke /here2 bhejo."
+        f"Ab isi chat mein end wale media pe reply karke /here2 bhejo."
     )
 
 
@@ -131,9 +116,9 @@ def here2(update: Update, context: CallbackContext):
     if not is_authorized(user.id):
         return
 
-    key = (user.id, chat.id)
-    if key not in sessions:
-        update.message.reply_text("❌ Pehle kisi media pe reply karke /here1 bhejo.")
+    session = sessions.get(user.id)
+    if not session or session["source_chat"] != chat.id:
+        update.message.reply_text("❌ Pehle isi chat mein kisi media pe reply karke /here1 bhejo.")
         return
 
     replied = update.message.reply_to_message
@@ -141,19 +126,41 @@ def here2(update: Update, context: CallbackContext):
         update.message.reply_text("❌ Kisi media message pe reply karke /here2 bhejo.")
         return
 
-    start_id = sessions.pop(key)
-    end_id = replied.message_id
-    lo, hi = min(start_id, end_id), max(start_id, end_id)
-    dest_chat_id = CHAT_MAP[chat.id]
+    session["end"] = replied.message_id
+    update.message.reply_text(
+        "✅ End point bhi mark ho gaya.\n\n"
+        "Ab jis bhi group/channel mein media bhejna hai, wahan jaake sirf /bhejde likh do "
+        "(is bot ko us group/channel mein admin hona chahiye)."
+    )
+
+
+def bhejde(update: Update, context: CallbackContext):
+    user = update.effective_user
+    dest_chat = update.effective_chat
+
+    if not is_authorized(user.id):
+        return
+
+    session = sessions.get(user.id)
+    if not session or session["end"] is None:
+        update.message.reply_text(
+            "❌ Pehle source group/channel mein /here1 aur /here2 use karo, "
+            "phir yahan aake /bhejde bhejo."
+        )
+        return
+
+    source_chat_id = session["source_chat"]
+    lo, hi = sorted([session["start"], session["end"]])
+    del sessions[user.id]
 
     update.message.reply_text(
-        f"⏳ ID {lo} se {hi} tak ({hi - lo + 1} messages) check karke media forward kar raha hoon. "
+        f"⏳ ID {lo} se {hi} tak ({hi - lo + 1} messages) check karke media is chat mein forward kar raha hoon. "
         f"Bade range mein time lag sakta hai, done hone pe DM karunga."
     )
 
     threading.Thread(
         target=forward_range,
-        args=(chat.id, dest_chat_id, lo, hi, user.id),
+        args=(source_chat_id, dest_chat.id, lo, hi, user.id),
         daemon=True,
     ).start()
 
@@ -217,6 +224,7 @@ dispatcher.add_handler(CommandHandler("chatid", chatid))
 dispatcher.add_handler(CommandHandler("cancel", cancel))
 dispatcher.add_handler(CommandHandler("here1", here1, filters=Filters.reply))
 dispatcher.add_handler(CommandHandler("here2", here2, filters=Filters.reply))
+dispatcher.add_handler(CommandHandler("bhejde", bhejde))
 
 
 # ---------- webhook ----------
