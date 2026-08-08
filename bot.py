@@ -1,20 +1,46 @@
 import os
-import re
+import time
 import logging
 import threading
-import time
-from io import BytesIO
 
-import requests
-import instaloader
 from flask import Flask, request
 from telegram import Update, Bot
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.error import RetryAfter, TelegramError
+from telegram.ext import (
+    Dispatcher,
+    CommandHandler,
+    Filters,
+    CallbackContext,
+)
 
 # --------------------- CONFIG ---------------------
 TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render env vars
-BASE_URL = os.getenv("WEBHOOK_URL", "https://gbbot-s267.onrender.com").rstrip("/")  # set in Render env vars
+BASE_URL = os.getenv("WEBHOOK_URL", "https://your-app.onrender.com").rstrip("/")
 WEBHOOK_URL = f"{BASE_URL}/{TOKEN}"
+
+# CHAT_MAP env format: "source_id1:dest_id1,source_id2:dest_id2"
+# Example: "-1001111111111:-1002222222222,-1003333333333:-1004444444444"
+def parse_chat_map(raw: str):
+    mapping = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        src, dst = pair.split(":")
+        mapping[int(src)] = int(dst)
+    return mapping
+
+
+CHAT_MAP = parse_chat_map(os.getenv("CHAT_MAP", ""))
+
+# AUTHORIZED_USERS env format: "123456789,987654321"
+AUTHORIZED_USERS = {
+    int(uid.strip())
+    for uid in os.getenv("AUTHORIZED_USERS", "").split(",")
+    if uid.strip()
+}
+
+FORWARD_DELAY = float(os.getenv("FORWARD_DELAY", "1.2"))  # seconds between each forward, tune if flood errors happen
 # --------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
@@ -24,105 +50,173 @@ app = Flask(__name__)
 bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
-# instaloader context - only used for fetching PUBLIC post metadata, no login
-L = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False,
-    download_video_thumbnails=False,
-    download_geotags=False,
-    download_comments=False,
-    save_metadata=False,
-    compress_json=False,
-)
-
-INSTAGRAM_URL_RE = re.compile(
-    r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)"
-)
+# session[(user_id, chat_id)] = start_message_id
+sessions = {}
 
 
-def extract_shortcode(text: str):
-    match = INSTAGRAM_URL_RE.search(text)
-    return match.group(1) if match else None
+def is_authorized(user_id: int) -> bool:
+    return user_id in AUTHORIZED_USERS
 
 
-def fetch_media_urls(shortcode: str):
-    """
-    Returns a list of dicts: [{"type": "video"/"photo", "url": "..."}]
-    Handles single posts, reels, and carousels (multiple items).
-    """
-    post = instaloader.Post.from_shortcode(L.context, shortcode)
-    items = []
-
-    if post.typename == "GraphSidecar":
-        for node in post.get_sidecar_nodes():
-            if node.is_video:
-                items.append({"type": "video", "url": node.video_url})
-            else:
-                items.append({"type": "photo", "url": node.display_url})
-    else:
-        if post.is_video:
-            items.append({"type": "video", "url": post.video_url})
-        else:
-            items.append({"type": "photo", "url": post.url})
-
-    return items
-
-
-def download_bytes(url: str) -> BytesIO:
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    buf = BytesIO(resp.content)
-    buf.seek(0)
-    return buf
+def is_media(msg) -> bool:
+    return any([
+        msg.photo,
+        msg.video,
+        msg.document,
+        msg.audio,
+        msg.animation,
+        msg.voice,
+        msg.video_note,
+        msg.sticker,
+    ])
 
 
 # ---------- handlers ----------
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "👋 Instagram Downloader Bot\n\n"
-        "Bas kisi bhi public Instagram post, reel, ya carousel ka link bhej do, "
-        "main uska media download karke bhej dunga."
+        "👋 Range Forward Bot\n\n"
+        "Source group/channel mein kisi media pe reply karke /here1 bhejo, "
+        "phir end wale media pe reply karke /here2 bhejo. "
+        "Beech ke saare media messages destination pe forward ho jayenge.\n\n"
+        "/myid — apna Telegram user ID dekho\n"
+        "/chatid — is chat ki ID dekho\n"
+        "/cancel — pending selection cancel karo"
     )
 
 
-def handle_message(update: Update, context: CallbackContext):
-    text = update.message.text or ""
-    shortcode = extract_shortcode(text)
+def myid(update: Update, context: CallbackContext):
+    update.message.reply_text(f"Your user ID: {update.effective_user.id}")
 
-    if not shortcode:
-        update.message.reply_text(
-            "❌ Ye valid Instagram post/reel link nahi lag raha. "
-            "Example: https://www.instagram.com/reel/XXXXXXXXX/"
-        )
+
+def chatid(update: Update, context: CallbackContext):
+    update.message.reply_text(f"This chat's ID: {update.effective_chat.id}")
+
+
+def cancel(update: Update, context: CallbackContext):
+    key = (update.effective_user.id, update.effective_chat.id)
+    if key in sessions:
+        del sessions[key]
+        update.message.reply_text("❌ Pending selection cancel ho gayi.")
+    else:
+        update.message.reply_text("Koi pending selection nahi hai.")
+
+
+def here1(update: Update, context: CallbackContext):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not is_authorized(user.id):
+        return  # silently ignore unauthorized users
+
+    if chat.id not in CHAT_MAP:
+        update.message.reply_text("⚠️ Ye chat kisi configured source/destination pair mein nahi hai.")
         return
 
-    update.message.reply_text("⏳ Downloading, thoda ruko...")
+    replied = update.message.reply_to_message
+    if not replied:
+        update.message.reply_text("❌ Kisi media message pe reply karke /here1 bhejo.")
+        return
+
+    sessions[(user.id, chat.id)] = replied.message_id
+    update.message.reply_text(
+        f"✅ Start point mark ho gaya (ID {replied.message_id}).\n"
+        f"Ab end wale media pe reply karke /here2 bhejo."
+    )
+
+
+def here2(update: Update, context: CallbackContext):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not is_authorized(user.id):
+        return
+
+    key = (user.id, chat.id)
+    if key not in sessions:
+        update.message.reply_text("❌ Pehle kisi media pe reply karke /here1 bhejo.")
+        return
+
+    replied = update.message.reply_to_message
+    if not replied:
+        update.message.reply_text("❌ Kisi media message pe reply karke /here2 bhejo.")
+        return
+
+    start_id = sessions.pop(key)
+    end_id = replied.message_id
+    lo, hi = min(start_id, end_id), max(start_id, end_id)
+    dest_chat_id = CHAT_MAP[chat.id]
+
+    update.message.reply_text(
+        f"⏳ ID {lo} se {hi} tak ({hi - lo + 1} messages) check karke media forward kar raha hoon. "
+        f"Bade range mein time lag sakta hai, done hone pe DM karunga."
+    )
+
+    threading.Thread(
+        target=forward_range,
+        args=(chat.id, dest_chat_id, lo, hi, user.id),
+        daemon=True,
+    ).start()
+
+
+def forward_one(source_chat_id: int, dest_chat_id: int, message_id: int):
+    """Forward a single message; delete it from destination if it isn't media.
+    Returns 'forwarded' / 'skipped' / 'error'."""
+    try:
+        msg = bot.forward_message(
+            chat_id=dest_chat_id,
+            from_chat_id=source_chat_id,
+            message_id=message_id,
+        )
+    except RetryAfter as e:
+        time.sleep(e.retry_after + 1)
+        return forward_one(source_chat_id, dest_chat_id, message_id)
+    except TelegramError:
+        return "error"
+
+    if is_media(msg):
+        return "forwarded"
 
     try:
-        items = fetch_media_urls(shortcode)
-    except Exception as e:
-        logger.error(f"Failed to fetch post {shortcode}: {e}")
-        update.message.reply_text(
-            "⚠️ Download nahi ho paya. Ho sakta hai post private ho, "
-            "delete ho gaya ho, ya Instagram ne rate-limit lagaya ho."
-        )
-        return
+        bot.delete_message(chat_id=dest_chat_id, message_id=msg.message_id)
+    except TelegramError:
+        pass
+    return "skipped"
 
-    for item in items:
-        try:
-            file_bytes = download_bytes(item["url"])
-            if item["type"] == "video":
-                update.message.reply_video(video=file_bytes)
-            else:
-                update.message.reply_photo(photo=file_bytes)
-        except Exception as e:
-            logger.error(f"Failed to send media: {e}")
-            update.message.reply_text("⚠️ Ek media file bhejne mein error aaya.")
+
+def forward_range(source_chat_id: int, dest_chat_id: int, lo: int, hi: int, notify_user_id: int):
+    forwarded = skipped = errors = 0
+
+    for mid in range(lo, hi + 1):
+        result = forward_one(source_chat_id, dest_chat_id, mid)
+        if result == "forwarded":
+            forwarded += 1
+        elif result == "skipped":
+            skipped += 1
+        else:
+            errors += 1
+        time.sleep(FORWARD_DELAY)
+
+    try:
+        bot.send_message(
+            chat_id=notify_user_id,
+            text=(
+                "✅ Forwarding complete!\n\n"
+                f"📦 Media forwarded: {forwarded}\n"
+                f"⏭️ Skipped (non-media): {skipped}\n"
+                f"⚠️ Errors (deleted/missing msgs): {errors}"
+            ),
+        )
+    except TelegramError as e:
+        logger.error(f"Failed to send completion notice: {e}")
 
 
 # ---------- register ----------
 dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+dispatcher.add_handler(CommandHandler("myid", myid))
+dispatcher.add_handler(CommandHandler("chatid", chatid))
+dispatcher.add_handler(CommandHandler("cancel", cancel))
+dispatcher.add_handler(CommandHandler("here1", here1, filters=Filters.reply))
+dispatcher.add_handler(CommandHandler("here2", here2, filters=Filters.reply))
 
 
 # ---------- webhook ----------
@@ -147,6 +241,7 @@ def set_webhook():
 
 def keep_alive():
     """Pings the Render app every 5 minutes to keep the free-tier instance awake."""
+    import requests
     while True:
         try:
             requests.get(WEBHOOK_URL)
