@@ -63,13 +63,9 @@ def is_media(msg) -> bool:
 # ---------- handlers ----------
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "👋 Range Forward Bot\n\n"
-        "1️⃣ Source group/channel mein pehle media pe reply karke /here1 bhejo\n"
-        "2️⃣ Last media pe reply karke /here2 bhejo\n"
-        "3️⃣ Jis bhi group/channel mein bhejna hai, wahan jaake /bhejde bhejo (koi reply nahi chahiye)\n\n"
-        "/myid — apna Telegram user ID dekho\n"
-        "/chatid — is chat ki ID dekho\n"
-        "/cancel — pending selection cancel karo"
+        "🤖 This is a Personalized bot\n"
+        "📤 This bot forward selected media\n\n"
+        "✨ To make your personalize bot for Group / Channel dm @ccxcv_295"
     )
 
 
@@ -102,11 +98,7 @@ def grant(update: Update, context: CallbackContext):
         return
 
     granted_users.add(target_id)
-    update.message.reply_text(
-        f"✅ User {target_id} authorize ho gaya.\n"
-        f"⚠️ Ye grant sirf tab tak valid hai jab tak bot restart nahi hota "
-        f"(Render ~30 din mein restart karta hai) — uske baad phir se /grant karna padega."
-    )
+    update.message.reply_text("✅ Authorized Granted")
 
 
 def revoke(update: Update, context: CallbackContext):
@@ -150,10 +142,7 @@ def here1(update: Update, context: CallbackContext):
         "start": replied.message_id,
         "end": None,
     }
-    update.message.reply_text(
-        f"✅ Start point mark ho gaya (ID {replied.message_id}).\n"
-        f"Ab isi chat mein end wale media pe reply karke /here2 bhejo."
-    )
+    update.message.reply_text("🎯 Start point marked")
 
 
 def here2(update: Update, context: CallbackContext):
@@ -174,14 +163,10 @@ def here2(update: Update, context: CallbackContext):
         return
 
     session["end"] = replied.message_id
-    update.message.reply_text(
-        "✅ End point bhi mark ho gaya.\n\n"
-        "Ab jis bhi group/channel mein media bhejna hai, wahan jaake sirf /bhejde likh do "
-        "(is bot ko us group/channel mein admin hona chahiye)."
-    )
+    update.message.reply_text("🏁 End point marked")
 
 
-def bhejde(update: Update, context: CallbackContext):
+def forward(update: Update, context: CallbackContext):
     user = update.effective_user
     dest_chat = update.effective_chat
 
@@ -192,7 +177,7 @@ def bhejde(update: Update, context: CallbackContext):
     if not session or session["end"] is None:
         update.message.reply_text(
             "❌ Pehle source group/channel mein /here1 aur /here2 use karo, "
-            "phir yahan aake /bhejde bhejo."
+            "phir yahan aake /forward bhejo."
         )
         return
 
@@ -201,8 +186,8 @@ def bhejde(update: Update, context: CallbackContext):
     del sessions[user.id]
 
     update.message.reply_text(
-        f"⏳ ID {lo} se {hi} tak ({hi - lo + 1} messages) check karke media is chat mein forward kar raha hoon. "
-        f"Bade range mein time lag sakta hai, done hone pe DM karunga."
+        "🚀 Forward started...If range is too long it may take some time\n"
+        "will DM you when it get completed"
     )
 
     threading.Thread(
@@ -271,7 +256,7 @@ dispatcher.add_handler(CommandHandler("chatid", chatid))
 dispatcher.add_handler(CommandHandler("cancel", cancel))
 dispatcher.add_handler(CommandHandler("here1", here1, filters=Filters.reply))
 dispatcher.add_handler(CommandHandler("here2", here2, filters=Filters.reply))
-dispatcher.add_handler(CommandHandler("bhejde", bhejde))
+dispatcher.add_handler(CommandHandler("forward", forward))
 dispatcher.add_handler(CommandHandler("grant", grant))
 dispatcher.add_handler(CommandHandler("revoke", revoke))
 dispatcher.add_handler(CommandHandler("listauth", listauth))
